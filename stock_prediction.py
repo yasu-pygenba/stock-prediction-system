@@ -291,7 +291,7 @@ class FeatureEngineer:
     def __init__(self):
         pass
 
-    def feature_create(self, clean_df: pd.DataFrame) -> pd.DataFrame:
+    def create_features(self, clean_df: pd.DataFrame) -> pd.DataFrame:
 
         df = clean_df.copy()
 
@@ -321,7 +321,7 @@ class FeatureEngineer:
 
         
         # GU/GD他の計算
-        df["前日比寄り率"] = (
+        df["前日寄り率"] = (
             (df["始値"] - df["前日終値"])
             / df["前日終値"] * 100
         )
@@ -384,14 +384,101 @@ class FeatureEngineer:
         df["寄買_引売_損益率"] = (
             df["寄買_引売_損益額_1株"] / df["始値"] * 100
         )
+
+        # 前日騰落率
+        df["前日騰落率"] = (
+            (df["終値"] - df["前日終値"]) / df["前日終値"] * 100
+        )
+
+        # 前日値幅率
+        df["値幅率"] = (
+            (df["高値"] - df["安値"]) / df["終値"] * 100
+        )
+
+        # 実体率
+        df["実体率"] = (
+            (df["終値"] - df["始値"]) / df["始値"] * 100
+        )
+
+        # 上ヒゲ率
+        df["上ヒゲ率"] = (
+            (df["高値"] - df[["始値", "終値"]].max(axis=1))
+            / df["始値"] * 100
+        )
+
+        # 下ヒゲ率
+        df["下ヒゲ率"] = (
+            (df[["始値", "終値"]].min(axis=1) - df["安値"])
+            / df["始値"] * 100
+        )
+
+        # 出来高25日平均
+        df["出来高MA25"] = (
+            df.groupby("Code")["出来高"]
+            .transform(lambda x: x.rolling(25).mean())
+        )
+
+        # 出来高急増率
+        df["出来高倍率25"] = df["出来高"] / df["出来高MA25"]
+
+        # 念のため再度日付順に並び替え
+        df = df.sort_values(["Code", "日付"]).reset_index(drop=True)
+
+        # ==========================
+        # target：当日寄り買い、引け売りで利益が出たか
+        # ==========================
+        df["target"] = (
+            df["終値"] > df["始値"]
+        ).astype(int)
+
+        # ==========================
+        # 個別銘柄：前日情報にずらす
+        # その日のデータはまだ存在していなため
+        # 前日の情報をスライドさせる
+        # ==========================
+        stock_shift_cols = [
+            "終値",
+            "始値",
+            "高値",
+            "安値",
+            "前日終値",
+            "出来高",
+            "予想PER",
+            "前日終値_MA5乖離率",
+            "前日終値_MA25乖離率",
+            "MA5向き",
+            "MA25向き",
+            "BB位置",
+            "前日終値_MA5判定",
+            "前日終値_MA25判定",
+            "前日陽線陰線",
+            "前日騰落率",
+            "値幅率",
+            "実体率",
+            "上ヒゲ率",
+            "下ヒゲ率",
+            "出来高倍率25",
+        ]
+
+        for col in stock_shift_cols:
+            if col in df.columns:
+                df[f"予測用_{col}"] = df.groupby("Code")[col].shift(1)
+
+        # ==========================
+        # 指数：前日情報にずらす
+        # ==========================
+        index_cols = index_list.copy()
+        
+        for col in index_cols:
+            if col in df.columns:
+                df[f"予測用_{col}"] = df.groupby("Code")[col].shift(1)
+
         
         feature_df = df.copy()
 
         return feature_df
 
     
-
-
 
 if __name__ == "__main__":
 
@@ -413,9 +500,11 @@ if __name__ == "__main__":
 
     # ----- 3.特徴量生成 -----------------------------------------------------
     feature = FeatureEngineer()
-    feature_df = feature.feature_create(clean_df)
+    feature_df = feature.create_features(clean_df)
 
     print("特徴量生成後の確認↓↓", feature_df.head(3))
+
+    print("\n 特徴量", feature_df.columns)
 
     
     print("\n テストおわり\n")

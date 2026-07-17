@@ -4,7 +4,13 @@ import yfinance as yf
 import os
 from datetime import datetime, timedelta
 
-from config import STOCK_CODES, INDEX_CODES
+import logging
+import requests
+from config import DISCORD_WEBHOOK_URL
+from config import STOCK_CODES, INDEX_CODES, STOCK_NAMES
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 stock_list = STOCK_CODES
 index_list = INDEX_CODES
@@ -184,9 +190,10 @@ class DataPreprocessor:
     データ分析をするために前処理を行うクラス
     """
 
-    def __init__(self, stock_df: pd.DataFrame, index_df: pd.DataFrame):
+    def __init__(self, stock_df: pd.DataFrame, index_df: pd.DataFrame, stock_names: dict = STOCK_NAMES):
         self.stock_df = stock_df
         self.index_df = index_df
+        self.stock_names = stock_names
 
     def _to_number(self, df: pd.DataFrame, number_columns: list) -> pd.DataFrame:
         """文字列などの数値を数値型に変換する（共通処理）"""
@@ -213,6 +220,9 @@ class DataPreprocessor:
             "Close": "終値",
             "Volume": "出来高",
         })
+
+        # 銘柄名をCodeに合わせて変換
+        self.stock_df["銘柄名"] = self.stock_df["Code"].astype(str).map(STOCK_NAMES)
 
         self.stock_df["日付"] = pd.to_datetime(self.stock_df["日付"])
 
@@ -288,8 +298,11 @@ class DataPreprocessor:
 # ３．特徴量生成
 class FeatureEngineer:
 
-    def __init__(self):
-        pass
+    def __init__(self, index_list: list):
+        """
+        configから指数のリストを受け取る（粗結合を保ち、内部での未定義エラーを防ぐ）
+        """
+        self.index_list = index_list
 
     def create_features(self, clean_df: pd.DataFrame) -> pd.DataFrame:
 
@@ -478,33 +491,282 @@ class FeatureEngineer:
 
         return feature_df
 
+# ４．予測モデル
+class Predictor:
+    
+    def __init__(self, stock_list: list = STOCK_CODES):
+
+        self.stock_list = stock_list
+
+    def prediction_today(self, df: pd.DataFrame, ) -> pd.DataFrame:
+        """
+        銘柄ごとに別モデルを学習し、
+        テスト精度と最新データの上昇予測確率を返す。
+        """
+        import pandas as pd
+        from sklearn.model_selection import train_test_split
+        from sklearn.ensemble import RandomForestClassifier
+        from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+
+        # 使用する特徴量
+        select_feaures = [
+            '予測用_終値', 
+            '予測用_始値', 
+            '予測用_高値', 
+            '予測用_安値', 
+            '予測用_前日終値',
+
+            '予測用_出来高', 
+            # '予測用_予想PER', 
+
+            '予測用_前日終値_MA5乖離率', 
+            '予測用_前日終値_MA25乖離率',
+            '予測用_MA5向き', 
+            '予測用_MA25向き', 
+            '予測用_前日終値_MA5判定', 
+            '予測用_前日終値_MA25判定',
+
+            '予測用_前日騰落率', 
+            '予測用_値幅率', 
+            '予測用_実体率', 
+            '予測用_上ヒゲ率', 
+            '予測用_下ヒゲ率',
+            '予測用_出来高倍率25', 
+
+            '予測用_^N225', 
+            '予測用_^NDX', 
+            '予測用_^DJI', 
+            '予測用_^SPX',
+            '予測用_^SOX', 
+            '予測用_USDJPY=X', 
+            '予測用_^VIX'
+        ]
+
+        result_list = []
+
+        df = df.copy()
+        df["Code"] = df["Code"].astype(str)
+        df["日付"] = pd.to_datetime(df["日付"])
+
+        for target_code in self.stock_list:
+            target_code = str(target_code)
+
+            # 対象銘柄だけ抽出し、時系列順に並べる
+            model_df = (
+                df[df["Code"] == target_code]
+                .sort_values("日付")
+                .copy()
+            )
+
+            if model_df.empty:
+                print(f"{target_code}: データがありません")
+                continue
+
+            stock_name = model_df["銘柄名"].iloc[0]
+
+            # 説明変数
+            X_raw = model_df[select_feaures].copy()
+
+            # カテゴリ変数をダミー化
+            X_encoded = pd.get_dummies(
+                X_raw,
+                drop_first=True
+            )
+
+            meta_cols = model_df[
+                ["日付", "銘柄名", "Code", "始値", "終値"]
+            ].copy()
+
+            y = model_df["target"].copy()
+
+            # 同じインデックスのまま結合
+            data = pd.concat(
+                [meta_cols, X_encoded, y],
+                axis=1
+            ).dropna()
+
+            # 学習可能な件数が少ない場合
+            if len(data) < 50:
+                print(
+                    f"{target_code} {stock_name}: "
+                    f"データ不足（{len(data)}件）"
+                )
+                continue
+
+            # targetが一方のクラスしかない場合は分類不能
+            if data["target"].nunique() < 2:
+                print(
+                    f"{target_code} {stock_name}: "
+                    "targetが1種類しかありません"
+                )
+                continue
+
+            # 時系列順を再確認
+            data = data.sort_values("日付").reset_index(drop=True)
+
+            split_idx = int(len(data) * 0.8)
+
+            train_df = data.iloc[:split_idx].copy()
+            test_df = data.iloc[split_idx:].copy()
+
+            drop_cols = [
+                "日付",
+                "銘柄名",
+                "Code",
+                "target",
+                "始値",
+                "終値",
+            ]
+
+            X_train = train_df.drop(columns=drop_cols)
+            y_train = train_df["target"]
+
+            X_test = test_df.drop(columns=drop_cols)
+            y_test = test_df["target"]
+
+            # 学習データに0と1の両方が存在するか確認
+            if y_train.nunique() < 2:
+                print(
+                    f"{target_code} {stock_name}: "
+                    "学習期間のtargetが1種類しかありません"
+                )
+                continue
+
+            model = RandomForestClassifier(
+                n_estimators=300,
+                max_depth=4,
+                min_samples_leaf=5,
+                random_state=42,
+            )
+
+            model.fit(X_train, y_train)
+
+            # テスト期間の評価
+            y_pred = model.predict(X_test)
+            accuracy = accuracy_score(y_test, y_pred)
+
+            # 最新行を予測
+            latest_row = data.iloc[[-1]].copy()
+            latest_X = latest_row.drop(columns=drop_cols)
+
+            # 念のため学習時と列を揃える
+            latest_X = latest_X.reindex(
+                columns=X_train.columns,
+                fill_value=0
+            )
+
+            probability = model.predict_proba(latest_X)[0, 1]
+            prediction = int(probability >= 0.5)
+
+            importance = (
+                pd.DataFrame({
+                    "feature": X_train.columns,
+                    "importance": model.feature_importances_
+                })
+                .sort_values("importance", ascending=False)
+            )
+
+            result_list.append({
+                "日付": latest_row["日付"].iloc[0],
+                "Code": target_code,
+                "銘柄名": stock_name,
+                "データ件数": len(data),
+                "学習件数": len(train_df),
+                "テスト件数": len(test_df),
+                "テスト精度": accuracy,
+                "予測確率": probability,
+                "予測": prediction,
+                "重要度": importance["feature"].iloc[1],
+                "重要度数": importance["importance"].iloc[1]
+            })
+
+        pred_df_stock = pd.DataFrame(result_list)
+
+        if not pred_df_stock.empty:
+            pred_df_stock = (
+                pred_df_stock
+                .sort_values("予測確率", ascending=False)
+                .reset_index(drop=True)
+            )
+
+        return pred_df_stock
+
+# ５．通知（Discord）
+class DiscordNotifier:
+    """Discordへの通知を担当するクラス（単一責任の原則）"""
+
+    def __init__(self, webhook_url: str = DISCORD_WEBHOOK_URL):
+        self.webhook_url = webhook_url
+
+    def make_discord_message(self, pred_df: pd.DataFrame) -> str:
+        """予測データからDiscord用のメッセージ文字列を作成する（ロジックの分離）"""
+        df = pred_df.copy()
+        df["予測確率"] = (df["予測確率"] * 100).round(1)
+
+        message = "【本日の株価予測ランキング】\n\n"
+        for _, row in df.iterrows():
+            message += f"{row['銘柄名']}：{row['予測確率']}%\n"
+
+        return message
+
+    def send_discord(self, pred_df: pd.DataFrame) -> bool:
+        """Discordにメッセージを送信する（外部通信とエラーハンドリング）"""
+        message = self.make_discord_message(pred_df)
+        payload = {"content": message}
+
+        try:
+            # timeoutを設定して、Discord側が重いときにプログラムが無限に止まるのを防ぐ
+            response = requests.post(
+                self.webhook_url, json=payload, timeout=10
+            )
+
+            # ステータスコードが200番台でない場合に例外（HTTPError）を発生させる
+            response.raise_for_status()
+
+            logger.info(
+                f"Discord通知に成功しました。ステータスコード: {response.status_code}"
+            )
+            return True
+
+        except requests.exceptions.RequestException as e:
+            # ネットワークエラーやWebhook URLの間違いなどが発生した場合、ログに記録して安全に処理を続ける
+            logger.error(f"Discord通知に失敗しました: {e}")
+            return False
+
+
     
 
 if __name__ == "__main__":
 
-    # # ----- 1.データ取得 --------------------------------------------------------
-    # data_acquisition = DataAcquisition(stock_list, index_list)
+    # ----- 1.データ取得 --------------------------------------------------------
+    data_acquisition = DataAcquisition(stock_list, index_list)
 
-    # # 各メソッドの引数に保存先CSVパスを渡し、取得・更新・結合を自動化
-    # stock_df = data_acquisition.fetch_stock_data("stock_data.csv")
-    # index_df = data_acquisition.fetch_index_data("index_data.csv")
+    # 各メソッドの引数に保存先CSVパスを渡し、取得・更新・結合を自動化
+    stock_df = data_acquisition.fetch_stock_data("stock_data.csv")
+    index_df = data_acquisition.fetch_index_data("index_data.csv")
 
     # ----- 2.前処理 --------------------------------------------------------
     # テスト用データ読み込み
     stock_df = pd.read_csv("stock_data.csv")
     index_df = pd.read_csv("index_data.csv")
 
-
     prprocessor = DataPreprocessor(stock_df, index_df)
     clean_df = prprocessor.process()
 
     # ----- 3.特徴量生成 -----------------------------------------------------
-    feature = FeatureEngineer()
+    feature = FeatureEngineer(INDEX_CODES)
     feature_df = feature.create_features(clean_df)
 
-    print("特徴量生成後の確認↓↓", feature_df.head(3))
+    # ----- 4.予測 -----------------------------------------------------
+    predictor = Predictor(STOCK_CODES)
+    pred_df = predictor.prediction_today(feature_df)
 
-    print("\n 特徴量", feature_df.columns)
+    print("\n 今日の予測結果↓↓")
+    print(pred_df)
 
+    notifier = DiscordNotifier(DISCORD_WEBHOOK_URL)
+    notifier.send_discord(pred_df)
+
+    print("\n Discordに通知しました")
     
     print("\n テストおわり\n")

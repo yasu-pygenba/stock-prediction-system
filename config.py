@@ -16,6 +16,7 @@ STOCK_CODES = [
 
 INDEX_CODES = [
     "^N225", # 日経
+    "NIY=F", # 日経先物
     "^NDX", # ナスダック100
     "^DJI", # ダウ30
     "^SPX", # SP500

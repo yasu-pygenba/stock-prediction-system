@@ -495,51 +495,28 @@ class FeatureEngineer:
 class Predictor:
     
     def __init__(self, stock_list: list = STOCK_CODES):
-
         self.stock_list = stock_list
 
-    def prediction_today(self, df: pd.DataFrame, ) -> pd.DataFrame:
+    def prediction_today(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        銘柄ごとに別モデルを学習し、
+        銘柄ごとに別モデルを学習し、重要度トップ10の特徴量を再選択して再学習。
         テスト精度と最新データの上昇予測確率を返す。
         """
         import pandas as pd
         from sklearn.model_selection import train_test_split
         from sklearn.ensemble import RandomForestClassifier
-        from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+        from sklearn.metrics import accuracy_score
 
         # 使用する特徴量
-        select_feaures = [
-            '予測用_終値', 
-            '予測用_始値', 
-            '予測用_高値', 
-            '予測用_安値', 
-            '予測用_前日終値',
-
+        select_features = [
+            '予測用_終値', '予測用_始値', '予測用_高値', '予測用_安値', '予測用_前日終値',
             '予測用_出来高', 
-            # '予測用_予想PER', 
-
-            '予測用_前日終値_MA5乖離率', 
-            '予測用_前日終値_MA25乖離率',
-            '予測用_MA5向き', 
-            '予測用_MA25向き', 
-            '予測用_前日終値_MA5判定', 
-            '予測用_前日終値_MA25判定',
-
-            '予測用_前日騰落率', 
-            '予測用_値幅率', 
-            '予測用_実体率', 
-            '予測用_上ヒゲ率', 
-            '予測用_下ヒゲ率',
+            '予測用_前日終値_MA5乖離率', '予測用_前日終値_MA25乖離率',
+            '予測用_MA5向き', '予測用_MA25向き', '予測用_前日終値_MA5判定', '予測用_前日終値_MA25判定',
+            '予測用_前日騰落率', '予測用_値幅率', '予測用_実体率', '予測用_上ヒゲ率', '予測用_下ヒゲ率',
             '予測用_出来高倍率25', 
-
-            '予測用_^N225', 
-            '予測用_^NDX', 
-            '予測用_^DJI', 
-            '予測用_^SPX',
-            '予測用_^SOX', 
-            '予測用_USDJPY=X', 
-            '予測用_^VIX'
+            '予測用_^N225', '予測用_NIY=F', '予測用_^NDX', '予測用_^DJI', '予測用_^SPX',
+            '予測用_^SOX', '予測用_USDJPY=X', '予測用_^VIX'
         ]
 
         result_list = []
@@ -552,11 +529,7 @@ class Predictor:
             target_code = str(target_code)
 
             # 対象銘柄だけ抽出し、時系列順に並べる
-            model_df = (
-                df[df["Code"] == target_code]
-                .sort_values("日付")
-                .copy()
-            )
+            model_df = df[df["Code"] == target_code].sort_values("日付").copy()
 
             if model_df.empty:
                 print(f"{target_code}: データがありません")
@@ -565,107 +538,90 @@ class Predictor:
             stock_name = model_df["銘柄名"].iloc[0]
 
             # 説明変数
-            X_raw = model_df[select_feaures].copy()
+            X_raw = model_df[select_features].copy()
 
             # カテゴリ変数をダミー化
-            X_encoded = pd.get_dummies(
-                X_raw,
-                drop_first=True
-            )
+            X_encoded = pd.get_dummies(X_raw, drop_first=True)
 
-            meta_cols = model_df[
-                ["日付", "銘柄名", "Code", "始値", "終値"]
-            ].copy()
-
+            meta_cols = model_df[["日付", "銘柄名", "Code", "始値", "終値"]].copy()
             y = model_df["target"].copy()
 
             # 同じインデックスのまま結合
-            data = pd.concat(
-                [meta_cols, X_encoded, y],
-                axis=1
-            ).dropna()
+            data = pd.concat([meta_cols, X_encoded, y], axis=1).dropna()
 
-            # 学習可能な件数が少ない場合
             if len(data) < 50:
-                print(
-                    f"{target_code} {stock_name}: "
-                    f"データ不足（{len(data)}件）"
-                )
+                print(f"{target_code} {stock_name}: データ不足（{len(data)}件）")
                 continue
 
-            # targetが一方のクラスしかない場合は分類不能
             if data["target"].nunique() < 2:
-                print(
-                    f"{target_code} {stock_name}: "
-                    "targetが1種類しかありません"
-                )
+                print(f"{target_code} {stock_name}: targetが1種類しかありません")
                 continue
 
             # 時系列順を再確認
             data = data.sort_values("日付").reset_index(drop=True)
 
             split_idx = int(len(data) * 0.8)
-
             train_df = data.iloc[:split_idx].copy()
             test_df = data.iloc[split_idx:].copy()
 
-            drop_cols = [
-                "日付",
-                "銘柄名",
-                "Code",
-                "target",
-                "始値",
-                "終値",
-            ]
+            drop_cols = ["日付", "銘柄名", "Code", "target", "始値", "終値"]
 
-            X_train = train_df.drop(columns=drop_cols)
+            X_train_full = train_df.drop(columns=drop_cols)
             y_train = train_df["target"]
-
-            X_test = test_df.drop(columns=drop_cols)
+            X_test_full = test_df.drop(columns=drop_cols)
             y_test = test_df["target"]
 
-            # 学習データに0と1の両方が存在するか確認
             if y_train.nunique() < 2:
-                print(
-                    f"{target_code} {stock_name}: "
-                    "学習期間のtargetが1種類しかありません"
-                )
+                print(f"{target_code} {stock_name}: 学習期間のtargetが1種類しかありません")
                 continue
 
-            model = RandomForestClassifier(
-                n_estimators=300,
+            # --- 1回目の学習（特徴量の重要度を測定するため） ---
+            initial_model = RandomForestClassifier(
+                n_estimators=300,  # 1回目は特徴量選定用なので少し少なめでもOK
                 max_depth=4,
                 min_samples_leaf=5,
                 random_state=42,
             )
+            initial_model.fit(X_train_full, y_train)
 
-            model.fit(X_train, y_train)
+            # 重要度の算出と上位10個の抽出
+            importance_df = pd.DataFrame({
+                "feature": X_train_full.columns,
+                "importance": initial_model.feature_importances_
+            }).sort_values("importance", ascending=False)
+            
+            # 上位10個の特徴量名を取得
+            top_n = 10
+            top_features = importance_df["feature"].head(top_n).tolist()
 
-            # テスト期間の評価
-            y_pred = model.predict(X_test)
+            # --- 2回目の学習（選ばれたトップ10の特徴量だけで再学習） ---
+            X_train_selected = X_train_full[top_features].copy()
+            X_test_selected = X_test_full[top_features].copy()
+
+            final_model = RandomForestClassifier(
+                n_estimators=300,  # 本番用モデルなので300本でじっくり学習
+                max_depth=4,
+                min_samples_leaf=5,
+                random_state=42,
+            )
+            final_model.fit(X_train_selected, y_train)
+
+            # テスト期間の評価（2回目モデル）
+            y_pred = final_model.predict(X_test_selected)
             accuracy = accuracy_score(y_test, y_pred)
 
             # 最新行を予測
             latest_row = data.iloc[[-1]].copy()
-            latest_X = latest_row.drop(columns=drop_cols)
+            latest_X_full = latest_row.drop(columns=drop_cols)
+            
+            # 学習時と列を揃えつつ、トップ10のみに絞り込む
+            latest_X_selected = latest_X_full.reindex(columns=X_train_full.columns, fill_value=0)
+            latest_X_selected = latest_X_selected[top_features]
 
-            # 念のため学習時と列を揃える
-            latest_X = latest_X.reindex(
-                columns=X_train.columns,
-                fill_value=0
-            )
-
-            probability = model.predict_proba(latest_X)[0, 1]
+            probability = final_model.predict_proba(latest_X_selected)[0, 1]
             prediction = int(probability >= 0.5)
 
-            importance = (
-                pd.DataFrame({
-                    "feature": X_train.columns,
-                    "importance": model.feature_importances_
-                })
-                .sort_values("importance", ascending=False)
-            )
-
+            # ログ用：この銘柄で一番重要だった特徴量（1位と2位）
             result_list.append({
                 "日付": latest_row["日付"].iloc[0],
                 "Code": target_code,
@@ -676,8 +632,10 @@ class Predictor:
                 "テスト精度": accuracy,
                 "予測確率": probability,
                 "予測": prediction,
-                "重要度": importance["feature"].iloc[1],
-                "重要度数": importance["importance"].iloc[1]
+                "重要度トップ1": importance_df["feature"].iloc[0],
+                "重要度数トップ1": importance_df["importance"].iloc[0],
+                "重要度トップ2": importance_df["feature"].iloc[1],
+                "重要度数トップ2": importance_df["importance"].iloc[1]
             })
 
         pred_df_stock = pd.DataFrame(result_list)
@@ -693,7 +651,7 @@ class Predictor:
 
 # ５．通知（Discord）
 class DiscordNotifier:
-    """Discordへの通知を担当するクラス（単一責任の原則）"""
+    """Discordへの通知を担当するクラス"""
 
     def __init__(self, webhook_url: str = DISCORD_WEBHOOK_URL):
         self.webhook_url = webhook_url
@@ -757,13 +715,14 @@ if __name__ == "__main__":
     feature = FeatureEngineer(INDEX_CODES)
     feature_df = feature.create_features(clean_df)
 
-    # ----- 4.予測 -----------------------------------------------------
+    # ----- 4.予測 ---------------------------------------------------------
     predictor = Predictor(STOCK_CODES)
     pred_df = predictor.prediction_today(feature_df)
 
     print("\n 今日の予測結果↓↓")
-    print(pred_df)
+    print(pred_df.head(3))
 
+    # ----- 5.通知 ---------------------------------------------------------
     notifier = DiscordNotifier(DISCORD_WEBHOOK_URL)
     notifier.send_discord(pred_df)
 

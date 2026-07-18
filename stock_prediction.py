@@ -9,6 +9,12 @@ import requests
 from config import DISCORD_WEBHOOK_URL
 from config import STOCK_CODES, INDEX_CODES, STOCK_NAMES
 
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score
+
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -106,17 +112,20 @@ class DataAcquisition:
             old_df['Date'] = pd.to_datetime(old_df['Date'])
             if not new_df.empty:
                 # 日付をUTCに一度合わせてタイムゾーン情報を消去
-                new_df['Date'] = pd.to_datetime(new_df['Date'], utc=True).dt.tz_localize(None)
+                # new_df['Date'] = pd.to_datetime(new_df['Date'], utc=True).dt.tz_localize(None)
+                new_df['Date'] = pd.to_datetime(new_df['Date']).dt.tz_localize(None).dt.normalize()
                 combined_df = pd.concat([old_df, new_df], ignore_index=True)
             else:
                 combined_df = old_df
         else:
             if not new_df.empty:
-                new_df["Date"] = pd.to_datetime(new_df["Date"], utc=True).dt.tz_localize(None)
+                # new_df["Date"] = pd.to_datetime(new_df["Date"], utc=True).dt.tz_localize(None)
+                new_df["Date"] = pd.to_datetime(new_df["Date"]).dt.tz_localize(None).dt.normalize()
             combined_df = new_df
 
         if not combined_df.empty:
-            combined_df["Date"] = pd.to_datetime(combined_df["Date"], utc=True).dt.tz_localize(None)
+            # combined_df["Date"] = pd.to_datetime(combined_df["Date"], utc=True).dt.tz_localize(None)
+            combined_df["Date"] = pd.to_datetime(combined_df["Date"]).dt.tz_localize(None).dt.normalize()
             combined_df["Code"] = combined_df["Code"].astype(str)
             # 日付とCodeの組み合わせで重複があれば削除
             combined_df = combined_df.drop_duplicates(subset=['Date', 'Code'], keep='last')
@@ -165,17 +174,17 @@ class DataAcquisition:
             old_df['Date'] = pd.to_datetime(old_df['Date'])
             if not new_df.empty:
                 # 日付をUTCに一度合わせてタイムゾーン情報を消去
-                new_df['Date'] = pd.to_datetime(new_df['Date'], utc=True).dt.tz_localize(None)
+                new_df['Date'] = pd.to_datetime(new_df['Date'].astype(str).str[:10])
                 combined_df = pd.concat([old_df, new_df], ignore_index=True)
             else:
                 combined_df = old_df
         else:
             if not new_df.empty:
-                new_df["Date"] = pd.to_datetime(new_df["Date"], utc=True).dt.tz_localize(None)
+                new_df["Date"] = pd.to_datetime(new_df["Date"].astype(str).str[:10])
             combined_df = new_df
         
         if not combined_df.empty:
-            combined_df["Date"] = pd.to_datetime(combined_df["Date"], utc=True).dt.tz_localize(None)
+            combined_df["Date"] = pd.to_datetime(combined_df["Date"].astype(str).str[:10])
             combined_df["Code"] = combined_df["Code"].astype(str)
 
             combined_df = combined_df.drop_duplicates(subset=['Date', 'Code'], keep='last')
@@ -454,7 +463,6 @@ class FeatureEngineer:
             "始値",
             "高値",
             "安値",
-            "前日終値",
             "出来高",
             "予想PER",
             "前日終値_MA5乖離率",
@@ -464,8 +472,6 @@ class FeatureEngineer:
             "BB位置",
             "前日終値_MA5判定",
             "前日終値_MA25判定",
-            "前日陽線陰線",
-            "前日騰落率",
             "値幅率",
             "実体率",
             "上ヒゲ率",
@@ -502,18 +508,14 @@ class Predictor:
         銘柄ごとに別モデルを学習し、重要度トップ10の特徴量を再選択して再学習。
         テスト精度と最新データの上昇予測確率を返す。
         """
-        import pandas as pd
-        from sklearn.model_selection import train_test_split
-        from sklearn.ensemble import RandomForestClassifier
-        from sklearn.metrics import accuracy_score
 
         # 使用する特徴量
         select_features = [
-            '予測用_終値', '予測用_始値', '予測用_高値', '予測用_安値', '予測用_前日終値',
-            '予測用_出来高', 
+            '予測用_終値', '予測用_始値', '予測用_高値', '予測用_安値', '予測用_出来高', 
             '予測用_前日終値_MA5乖離率', '予測用_前日終値_MA25乖離率',
             '予測用_MA5向き', '予測用_MA25向き', '予測用_前日終値_MA5判定', '予測用_前日終値_MA25判定',
-            '予測用_前日騰落率', '予測用_値幅率', '予測用_実体率', '予測用_上ヒゲ率', '予測用_下ヒゲ率',
+            # '前日騰落率', 
+            '予測用_値幅率', '予測用_実体率', '予測用_上ヒゲ率', '予測用_下ヒゲ率',
             '予測用_出来高倍率25', 
             '予測用_^N225', '予測用_NIY=F', '予測用_^NDX', '予測用_^DJI', '予測用_^SPX',
             '予測用_^SOX', '予測用_USDJPY=X', '予測用_^VIX'
@@ -547,7 +549,16 @@ class Predictor:
             y = model_df["target"].copy()
 
             # 同じインデックスのまま結合
-            data = pd.concat([meta_cols, X_encoded, y], axis=1).dropna()
+            # data = pd.concat([meta_cols, X_encoded, y], axis=1).dropna()
+
+            data_all = pd.concat([meta_cols, X_encoded, y], axis=1)
+
+            data_all = data_all.sort_values("日付").reset_index(drop=True)
+
+            latest_row = data_all.iloc[[-1]].copy()
+
+            historical_data = data_all.iloc[:-1].copy()
+            data = historical_data.dropna()
 
             if len(data) < 50:
                 print(f"{target_code} {stock_name}: データ不足（{len(data)}件）")
@@ -611,12 +622,14 @@ class Predictor:
             accuracy = accuracy_score(y_test, y_pred)
 
             # 最新行を予測
-            latest_row = data.iloc[[-1]].copy()
+            # latest_row = data.iloc[[-1]].copy()
             latest_X_full = latest_row.drop(columns=drop_cols)
             
             # 学習時と列を揃えつつ、トップ10のみに絞り込む
             latest_X_selected = latest_X_full.reindex(columns=X_train_full.columns, fill_value=0)
             latest_X_selected = latest_X_selected[top_features]
+
+            latest_X_selected = latest_X_selected.fillna(0)
 
             probability = final_model.predict_proba(latest_X_selected)[0, 1]
             prediction = int(probability >= 0.5)
@@ -691,7 +704,172 @@ class DiscordNotifier:
             logger.error(f"Discord通知に失敗しました: {e}")
             return False
 
+# ６．バックテスト
+class BackTester:
+    """
+    予測モデルの結果に基づいたバックテストを実行
+    ロング（買い）およびショート（空売り）戦略のパフォーマンスを集計するクラス
+    予測結果=>0.5 :
+    　１．寄り買いして引け売りした時の損益
+    　２．寄り買いして利確ライン5%、損切ライン3%にした時の損益
+    予測結果<0.5 :
+    　１．寄り空売りして引け買い戻した時の損益
+    """
 
+    def __init__(self, take_profit: float = 1.05, stop_loss: float = 0.97):
+        """
+        Args:
+            take_profit:利確ライン（例:1.05 = 5%）
+            stop_loss:損切ライン（例：0.97 = -3%)
+        """
+        self.take_profit = take_profit
+        self.stop_loss = stop_loss
+
+    def _calculate_oco_profit(self, row: pd.Series) -> dict:
+        """
+        1日の中での利確・損切（OCO）のシミュレーション（買い限定）
+        """
+        entry = row["始値"]
+        # 利確・損切価格を算出（100円単位などに丸めず実数で計算）
+        tp_price = entry * self.take_profit
+        sl_price = entry * self.stop_loss
+
+        high = row["高値"]
+        low = row["安値"]
+        close = row["終値"]
+
+        # 損切優先のロジック
+        if low <= sl_price:
+            exit_price = sl_price
+            result = "損切"
+        elif high >= tp_price:
+            exit_price = tp_price
+            result = "利確"
+        else:
+            exit_price = close
+            result = "引け"
+        
+        profit_yen = exit_price - entry
+        profit_rate = (profit_yen / entry) * 100
+
+        return {"損益額_1株": profit_yen, "損益率": profit_rate, "結果": result}
+
+    def run_backtest(self, prediction_results_df: pd.DataFrame, price_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        予測結果と株価データを結合し、日ごとのバックテスト結果を算出する
+
+        Args:
+            prediction_results_df: 日付, Code, 予想確率 が入ったDataFrame
+            price_df: 日付, Code, 始値, 高値, 安値, 終値 が入ったDataFrame
+        """
+        # データのコピーと型変換
+        pred_df = prediction_results_df.copy()
+        prices = price_df.copy()
+
+        pred_df["Code"] = pred_df["Code"].astype(str)
+        prices["Code"] = prices["Code"].astype(str)
+        pred_df["日付"] = pd.to_datetime(pred_df["日付"])
+        prices["日付"] = pd.to_datetime(prices["日付"])
+
+        # 予測データと株価データを日付とCodeをキーに結合
+        bt_data = pd.merge(pred_df, prices, on=["日付", "Code"], how="inner")
+
+        reults = []
+
+        for _, row in bt_data.iterrows():
+            prob = row["予測確率"]
+            entry = row["始値"]
+            close = row["終値"]
+
+            trade_info = {
+                "日付": row["日付"],
+                "Code": row["Code"],
+                "銘柄名": row.get("銘柄名", ""),
+                "予測確率": prob,
+                "始値": entry,
+                "終値": close,
+                "戦略": "待機",
+                "損益額_1株": 0.0,
+                "損益率": 0.0,
+                "OCO結果": "対象外",
+            }
+        
+            # ① 予想確率 0.5 異常　→　買い（ロングエントリー）
+            if prob >= 0.5:
+                # 寄り買い・引け売り
+                profit_yen = close - entry
+                profit_rate = (profit_yen / entry) * 100
+
+                # OCO（利確・損切）の計算
+                oco_res = self._calculate_oco_profit(row)
+
+                trade_info.update({
+                    "戦略": "寄り買い_引け売り",
+                    "損益額_1株": profit_yen,
+                    "損益率": profit_rate,
+                    "OCO_損益額_1株": oco_res["損益額_1株"],
+                    "OCO_損益率": oco_res["損益率"],
+                    "OCO結果": oco_res["結果"]
+                })
+
+            # ② 予想確率 0.5 未満　→　空売り（ショートエントリー）
+            else:
+                # 寄り空売り・引け買い戻し
+                profit_yen = - (close - entry)
+                profit_rate = (profit_rate / entry) * 100
+
+                trade_info.update({
+                    "戦略": "寄り買い_引け売り",
+                    "損益額_1株": profit_yen,
+                    "損益率": profit_rate,
+                    # 空売りの日中OCOはまだ未実装
+                    "OCO_損益額_1株": profit_yen,
+                    "OCO_損益率": profit_rate,
+                    "OCO結果": "引け（空売り）"
+                })
+            
+            reults.append(trade_info)
+
+        return pd.DataFrame(reults)
+    
+    def summarize_performance(self, detailed_result_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        詳細なバックテスト結果から、戦略ごとの累計損益や勝率をまとめる
+        """
+        df = detailed_result_df.copy()
+        summary_list = []
+
+        for strategy_name in ["寄り買い_引け売り", "寄り空売り_引け買い戻し"]:
+            strat_df = df[df["戦略"] == strategy_name]
+
+            if strat_df.empty:
+                continue
+
+            total_profit_rate = strat_df["損益率"].sum()
+            total_profit_yen = strat_df["損益額_1株"].sum()
+            win_rate = strat_df["損益額_1株"].gt(0).mean() * 100
+            trade_count = len(strat_df)
+
+            summary_list.append({
+                "戦略": strategy_name,
+                "トレード回数": trade_count,
+                "累計損益率(%)": round(total_profit_rate, 2),
+                "累計損益額(円)": total_profit_yen,
+                "勝率(%)": round(win_rate, 2)
+            })
+        
+        # 買い戦略における OCO（利確・損切）パターンの集計も追加
+        buy_strat_df = df[df["戦略"] == "寄り買い_引け売り"]
+        if not buy_strat_df.empty:
+            summary_list.append({
+                "戦略": f"寄り買い_OCO（利確:{self.take_profit}, 損切:{self.stop_loss})",
+                "トレード回数": len(buy_strat_df),
+                "累計損益率(%)": round(buy_strat_df["OCO_損益率"].sum(), 2),
+                "累計損益額(円)": buy_strat_df["OCO_損益額_1株"].sum(),
+                "勝率(%)": round(buy_strat_df["OCO_損益額_1株"].gt(0).mean() * 100, 2),
+            })
+
+        return pd.DataFrame(summary_list)
     
 
 if __name__ == "__main__":
@@ -723,9 +901,21 @@ if __name__ == "__main__":
     print(pred_df.head(3))
 
     # ----- 5.通知 ---------------------------------------------------------
-    notifier = DiscordNotifier(DISCORD_WEBHOOK_URL)
-    notifier.send_discord(pred_df)
+    # notifier = DiscordNotifier(DISCORD_WEBHOOK_URL)
+    # notifier.send_discord(pred_df)
 
-    print("\n Discordに通知しました")
+    # print("\n Discordに通知しました")
+
+    # ----- 6.バックテスト ---------------------------------------------------
+    backtester = BackTester(take_profit=1.05, stop_loss=0.97)
+    bt_df = backtester.run_backtest(prediction_results_df=pred_df, price_df=clean_df)
+
+    print("バックテストが終わりました")
+    print(bt_df.head())
+
+    summary_df = backtester.summarize_performance(bt_df)
+
+    print("\n 集計結果")
+    print(summary_df)
     
     print("\n テストおわり\n")

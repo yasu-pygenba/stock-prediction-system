@@ -9,6 +9,8 @@ import requests
 from config import DISCORD_WEBHOOK_URL
 from config import STOCK_CODES, INDEX_CODES, STOCK_NAMES
 
+import pandas_market_calendars as mcal
+
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
@@ -112,19 +114,16 @@ class DataAcquisition:
             old_df['Date'] = pd.to_datetime(old_df['Date'])
             if not new_df.empty:
                 # 日付をUTCに一度合わせてタイムゾーン情報を消去
-                # new_df['Date'] = pd.to_datetime(new_df['Date'], utc=True).dt.tz_localize(None)
                 new_df['Date'] = pd.to_datetime(new_df['Date']).dt.tz_localize(None).dt.normalize()
                 combined_df = pd.concat([old_df, new_df], ignore_index=True)
             else:
                 combined_df = old_df
         else:
             if not new_df.empty:
-                # new_df["Date"] = pd.to_datetime(new_df["Date"], utc=True).dt.tz_localize(None)
                 new_df["Date"] = pd.to_datetime(new_df["Date"]).dt.tz_localize(None).dt.normalize()
             combined_df = new_df
 
         if not combined_df.empty:
-            # combined_df["Date"] = pd.to_datetime(combined_df["Date"], utc=True).dt.tz_localize(None)
             combined_df["Date"] = pd.to_datetime(combined_df["Date"]).dt.tz_localize(None).dt.normalize()
             combined_df["Code"] = combined_df["Code"].astype(str)
             # 日付とCodeの組み合わせで重複があれば削除
@@ -301,6 +300,36 @@ class DataPreprocessor:
         # 指数の前日比率がNaN（欠損値）の補完は直近値、残りを0
         index_cols = [col for col in index_pivot.columns if col != "日付"]
         merged_df[index_cols] = merged_df[index_cols].ffill().fillna(0)
+
+
+        latest_date = merged_df["日付"].max()
+        
+        # JPXのカレンダーを取得
+        jpx = mcal.get_calendar("JPX")
+
+        # 最新日から15日先までを念のため取得
+        schedule = jpx.valid_days(start_date=latest_date, end_date=latest_date + pd.Timedelta(days=15))
+        # タイムゾーンを消去
+        schedule = schedule.tz_localize(None)
+
+        # 最新日から未来の日付だけを抽出し、その一番最初の日付を取得
+        future_days = schedule[schedule > latest_date]
+        next_date = future_days[0]
+
+        future_rows = []
+        for code in merged_df["Code"].unique():
+            stock_name = merged_df[merged_df["Code"] == code]["銘柄名"].iloc[0]
+            future_rows.append({
+                "日付": next_date,
+                "Code": code,
+                "銘柄名": stock_name,
+            })
+
+        future_df = pd.DataFrame(future_rows)
+        merged_df = pd.concat([merged_df, future_df], ignore_index=True)
+
+        # Codeと日付順に並び替えてリセット
+        merged_df = merged_df.sort_values(["日付", "日付"]).reset_index(drop=True)
 
         return merged_df
     
@@ -885,11 +914,11 @@ class BackTester:
 if __name__ == "__main__":
 
     # ----- 1.データ取得 --------------------------------------------------------
-    # data_acquisition = DataAcquisition(stock_list, index_list)
+    data_acquisition = DataAcquisition(stock_list, index_list)
 
-    # # 各メソッドの引数に保存先CSVパスを渡し、取得・更新・結合を自動化
-    # stock_df = data_acquisition.fetch_stock_data("stock_data.csv")
-    # index_df = data_acquisition.fetch_index_data("index_data.csv")
+    # 各メソッドの引数に保存先CSVパスを渡し、取得・更新・結合を自動化
+    stock_df = data_acquisition.fetch_stock_data("stock_data.csv")
+    index_df = data_acquisition.fetch_index_data("index_data.csv")
 
     # ----- 2.前処理 --------------------------------------------------------
     # テスト用データ読み込み
@@ -898,6 +927,8 @@ if __name__ == "__main__":
 
     prprocessor = DataPreprocessor(stock_df, index_df)
     clean_df = prprocessor.process()
+
+    clean_df.to_pickle("clean_df.pkl")
 
     # ----- 3.特徴量生成 -----------------------------------------------------
     feature = FeatureEngineer(INDEX_CODES)
@@ -910,20 +941,27 @@ if __name__ == "__main__":
     print("\n 今日の予測結果↓↓ \n")
     print(pred_df.head(3))
 
-    # ----- 5.通知 ---------------------------------------------------------
-    # notifier = DiscordNotifier(DISCORD_WEBHOOK_URL)
-    # notifier.send_discord(pred_df)
+    pred_df.to_pickle("pred_df.pkl")
+    backtest_pred_df.to_pickle("backtest_pred_df.pkl")
 
-    # print("\n Discordに通知しました")
+    # ----- 5.通知 ---------------------------------------------------------
+    notifier = DiscordNotifier(DISCORD_WEBHOOK_URL)
+    notifier.send_discord(pred_df)
+
+    print("\n Discordに通知しました")
 
     # ----- 6.バックテスト ---------------------------------------------------
+    clean_df = pd.read_pickle("clean_df.pkl")
+    pred_df = pd.read_pickle("pred_df.pkl")
+    backtest_pred_df = pd.read_pickle("backtest_pred_df.pkl")
+
     backtester = BackTester(take_profit=1.05, stop_loss=0.97)
     bt_df = backtester.run_backtest(backtest_pred_df=backtest_pred_df, price_df=clean_df)
 
     print("\n バックテストが終わりました \n")
     if not bt_df.empty:
-        latest_date = pred_df["日付"].max()
-        latest_bt_df = pred_df[pred_df["日付"] == latest_date]
+        latest_date = bt_df["日付"].max()
+        latest_bt_df = bt_df[bt_df["日付"] == latest_date]
 
         # 日付の表記を YY-MM-DD に整えて表示
         print(f"\n【直近取引日（{latest_date.strftime('%Y-%m-%d')}）のバックテスト結果】")

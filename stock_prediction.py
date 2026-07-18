@@ -522,6 +522,7 @@ class Predictor:
         ]
 
         result_list = []
+        backtest_list = []
 
         df = df.copy()
         df["Code"] = df["Code"].astype(str)
@@ -617,12 +618,16 @@ class Predictor:
             )
             final_model.fit(X_train_selected, y_train)
 
-            # テスト期間の評価（2回目モデル）
-            y_pred = final_model.predict(X_test_selected)
+            # バックテスト用リストに保存
+            test_proba = final_model.predict_proba(X_test_selected)[:, 1]
+            y_pred = (test_proba >= 0.5).astype(int)
             accuracy = accuracy_score(y_test, y_pred)
 
+            test_results = test_df[["日付", "Code", "銘柄名"]].copy()
+            test_results["予測確率"] = test_proba
+            backtest_list.append(test_results)
+
             # 最新行を予測
-            # latest_row = data.iloc[[-1]].copy()
             latest_X_full = latest_row.drop(columns=drop_cols)
             
             # 学習時と列を揃えつつ、トップ10のみに絞り込む
@@ -660,7 +665,12 @@ class Predictor:
                 .reset_index(drop=True)
             )
 
-        return pred_df_stock
+        if backtest_list:
+            backtest_pred_df = pd.concat(backtest_list, ignore_index=True)
+        else:
+            backtest_pred_df = pd.DataFrame()
+
+        return pred_df_stock, backtest_pred_df
 
 # ５．通知（Discord）
 class DiscordNotifier:
@@ -754,7 +764,7 @@ class BackTester:
 
         return {"損益額_1株": profit_yen, "損益率": profit_rate, "結果": result}
 
-    def run_backtest(self, prediction_results_df: pd.DataFrame, price_df: pd.DataFrame) -> pd.DataFrame:
+    def run_backtest(self, backtest_pred_df: pd.DataFrame, price_df: pd.DataFrame) -> pd.DataFrame:
         """
         予測結果と株価データを結合し、日ごとのバックテスト結果を算出する
 
@@ -763,7 +773,7 @@ class BackTester:
             price_df: 日付, Code, 始値, 高値, 安値, 終値 が入ったDataFrame
         """
         # データのコピーと型変換
-        pred_df = prediction_results_df.copy()
+        pred_df = backtest_pred_df.copy()
         prices = price_df.copy()
 
         pred_df["Code"] = pred_df["Code"].astype(str)
@@ -794,7 +804,7 @@ class BackTester:
                 "OCO結果": "対象外",
             }
         
-            # ① 予想確率 0.5 異常　→　買い（ロングエントリー）
+            # ① 予想確率 0.5 以上　→　買い（ロングエントリー）
             if prob >= 0.5:
                 # 寄り買い・引け売り
                 profit_yen = close - entry
@@ -816,10 +826,10 @@ class BackTester:
             else:
                 # 寄り空売り・引け買い戻し
                 profit_yen = - (close - entry)
-                profit_rate = (profit_rate / entry) * 100
+                profit_rate = (profit_yen / entry) * 100
 
                 trade_info.update({
-                    "戦略": "寄り買い_引け売り",
+                    "戦略": "寄り空売り_引け買い戻し",
                     "損益額_1株": profit_yen,
                     "損益率": profit_rate,
                     # 空売りの日中OCOはまだ未実装
@@ -875,11 +885,11 @@ class BackTester:
 if __name__ == "__main__":
 
     # ----- 1.データ取得 --------------------------------------------------------
-    data_acquisition = DataAcquisition(stock_list, index_list)
+    # data_acquisition = DataAcquisition(stock_list, index_list)
 
-    # 各メソッドの引数に保存先CSVパスを渡し、取得・更新・結合を自動化
-    stock_df = data_acquisition.fetch_stock_data("stock_data.csv")
-    index_df = data_acquisition.fetch_index_data("index_data.csv")
+    # # 各メソッドの引数に保存先CSVパスを渡し、取得・更新・結合を自動化
+    # stock_df = data_acquisition.fetch_stock_data("stock_data.csv")
+    # index_df = data_acquisition.fetch_index_data("index_data.csv")
 
     # ----- 2.前処理 --------------------------------------------------------
     # テスト用データ読み込み
@@ -895,9 +905,9 @@ if __name__ == "__main__":
 
     # ----- 4.予測 ---------------------------------------------------------
     predictor = Predictor(STOCK_CODES)
-    pred_df = predictor.prediction_today(feature_df)
+    pred_df, backtest_pred_df = predictor.prediction_today(feature_df)
 
-    print("\n 今日の予測結果↓↓")
+    print("\n 今日の予測結果↓↓ \n")
     print(pred_df.head(3))
 
     # ----- 5.通知 ---------------------------------------------------------
@@ -908,14 +918,22 @@ if __name__ == "__main__":
 
     # ----- 6.バックテスト ---------------------------------------------------
     backtester = BackTester(take_profit=1.05, stop_loss=0.97)
-    bt_df = backtester.run_backtest(prediction_results_df=pred_df, price_df=clean_df)
+    bt_df = backtester.run_backtest(backtest_pred_df=backtest_pred_df, price_df=clean_df)
 
-    print("バックテストが終わりました")
-    print(bt_df.head())
+    print("\n バックテストが終わりました \n")
+    if not bt_df.empty:
+        latest_date = pred_df["日付"].max()
+        latest_bt_df = pred_df[pred_df["日付"] == latest_date]
 
+        # 日付の表記を YY-MM-DD に整えて表示
+        print(f"\n【直近取引日（{latest_date.strftime('%Y-%m-%d')}）のバックテスト結果】")
+        print(latest_bt_df.drop(columns=["日付"]).sort_values("予測確率", ascending=False))
+    else:
+        print("\n バックテストのデータがありませんでした。")
+        
     summary_df = backtester.summarize_performance(bt_df)
 
-    print("\n 集計結果")
+    print("\n 【全期間の集計結果】 \n")
     print(summary_df)
     
     print("\n テストおわり\n")

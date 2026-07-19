@@ -36,3 +36,18 @@
  ┣ 📜 config.py               # 銘柄リスト(CSV読込)、各種パラメータ設定
  ┣ 📜 stock_prediction.py     # メイン実行スクリプト（パイプライン全体の統括）
  ┗ 📜 .env                    # 環境変数（Discord Webhook URLなど） ※Git管理外
+
+## 🚀 実行方法
+※環境構築後、以下のコマンドでシステムを実行できます。
+
+# パッケージのインストール
+pip install -r requirements.txt
+
+# システムの実行
+python stock_prediction.py
+
+## 🌱 課題と今後の展望
+
+- データベースへの移行: 現在はCSVによるデータ管理を行っていますが、今後のデータ量増加を見据え、リレーショナルデータベース（SQLite / PostgreSQL等）への移行を検討しています。
+
+- モデルの改善: ランダムフォレストに加え、LightGBMやXGBoostなどの勾配ブースティング手法の導入と、予測精度の比較検証を行いたいと考えています。

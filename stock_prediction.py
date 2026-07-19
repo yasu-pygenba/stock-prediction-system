@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 import logging
 import requests
 from config import DISCORD_WEBHOOK_URL
-from config import STOCK_CODES, INDEX_CODES, STOCK_NAMES
+from config import STOCK_CODES, INDEX_CODES, STOCK_NAMES, SECTOR_DICT, INDUSTRY_DICT
 
 import pandas_market_calendars as mcal
 
@@ -20,8 +20,6 @@ from sklearn.metrics import accuracy_score
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-stock_list = STOCK_CODES
-index_list = INDEX_CODES
 
 # 1.データの取得
 class DataAcquisition:
@@ -29,7 +27,7 @@ class DataAcquisition:
     YahooファイナンスAPIから株価の取得と過去データへの差分更新を行うクラス
     """
 
-    def __init__(self, stock_list: list, index_list: list, default_period: str = "2y"):
+    def __init__(self, stock_list: list, index_list: list, default_period: str = "5y"):
         self.stock_list = stock_list
         self.index_list = index_list
         self.default_period = default_period
@@ -96,7 +94,7 @@ class DataAcquisition:
             stock_df['予想PER'] = info.get("forwardPE")
             stock_df['予想EPS'] = info.get("forwardEps")
             stock_df['Code'] = stock_code
-            stock_df['銘柄名'] = info.get("shortName")
+            # stock_df['銘柄名'] = info.get("shortName")
 
             all_stock.append(stock_df)
             print(stock_code, f" 取得完了（開始日：{start_date if start_date else self.default_period}）")
@@ -198,10 +196,10 @@ class DataPreprocessor:
     データ分析をするために前処理を行うクラス
     """
 
-    def __init__(self, stock_df: pd.DataFrame, index_df: pd.DataFrame, stock_names: dict = STOCK_NAMES):
-        self.stock_df = stock_df
-        self.index_df = index_df
+    def __init__(self, stock_names: dict = STOCK_NAMES, industry_dict: dict = INDUSTRY_DICT, sector_dict: dict = SECTOR_DICT):
         self.stock_names = stock_names
+        self.industry_dict = industry_dict
+        self.sector_dict = sector_dict
 
     def _to_number(self, df: pd.DataFrame, number_columns: list) -> pd.DataFrame:
         """文字列などの数値を数値型に変換する（共通処理）"""
@@ -211,16 +209,18 @@ class DataPreprocessor:
             df[number_col] = pd.to_numeric(df[number_col], errors="coerce")
         return df
     
-    def process(self) -> pd.DataFrame:
+    def process(self, stock_df: pd.DataFrame, index_df: pd.DataFrame) -> pd.DataFrame:
         """個別株と指数の前処理、前日比率計算、指数は横結合する"""
 
         # -----------------------------------------------------------------------
         # １．個別株の前処理
         # -----------------------------------------------------------------------
-        if "Date" not in self.stock_df.columns and self.stock_df.index.name == "Date":
-            self.stock_df = self.stock_df.reset_index()
+        stock_df = stock_df.copy()
         
-        self.stock_df = self.stock_df.rename(columns={
+        if "Date" not in stock_df.columns and stock_df.index.name == "Date":
+            stock_df = stock_df.reset_index()
+        
+        stock_df = stock_df.rename(columns={
             "Date": "日付",
             "Open": "始値",
             "High": "高値",
@@ -229,20 +229,22 @@ class DataPreprocessor:
             "Volume": "出来高",
         })
 
-        # 銘柄名をCodeに合わせて変換
-        self.stock_df["銘柄名"] = self.stock_df["Code"].astype(str).map(STOCK_NAMES)
+        # 銘柄名・業種・セクターをCodeに合わせて変換
+        stock_df["銘柄名"] = stock_df["Code"].astype(str).map(self.stock_names)
+        stock_df["業種"] = stock_df["Code"].astype(str).map(self.industry_dict)
+        stock_df["セクター"] = stock_df["Code"].astype(str).map(self.sector_dict)
 
-        self.stock_df["日付"] = pd.to_datetime(self.stock_df["日付"])
+        stock_df["日付"] = pd.to_datetime(stock_df["日付"])
 
         number_columns = [
             "始値", "高値", "安値", "終値", "出来高"
         ]
 
-        self.stock_df[number_columns] = self._to_number(self.stock_df[number_columns], number_columns)
-        self.stock_df["Code"] = self.stock_df["Code"].astype(str)
+        stock_df[number_columns] = self._to_number(stock_df[number_columns], number_columns)
+        stock_df["Code"] = stock_df["Code"].astype(str)
 
-        self.stock_df = (
-            self.stock_df
+        stock_df = (
+            stock_df
             .sort_values(["Code", "日付"])
             .drop_duplicates(subset=["Code", "日付"], keep="last")
             .reset_index(drop=True)
@@ -251,35 +253,35 @@ class DataPreprocessor:
         # ----------------------------------------------------------------------------
         # ２．指数の前処理と前日比率の計算
         # ----------------------------------------------------------------------------
-        if "Date" not in self.index_df.columns and self.index_df.index.name == "Date":
-            self.index_df = self.index_df.reset_index()
+        if "Date" not in index_df.columns and index_df.index.name == "Date":
+            index_df = index_df.reset_index()
 
-        self.index_df = self.index_df.rename(columns={
+        index_df = index_df.rename(columns={
             "Date": "日付", "Close": "指数終値"
         })
-        self.index_df["日付"] = pd.to_datetime(self.index_df["日付"])
-        self.index_df['指数終値'] = pd.to_numeric(self.index_df["指数終値"], errors="coerce")
-        self.index_df['Code'] = self.index_df["Code"].astype(str)
+        index_df["日付"] = pd.to_datetime(index_df["日付"])
+        index_df['指数終値'] = pd.to_numeric(index_df["指数終値"], errors="coerce")
+        index_df['Code'] = index_df["Code"].astype(str)
 
-        self.index_df = (
-            self.index_df
+        index_df = (
+            index_df
             .sort_values(["Code", "日付"])
             .drop_duplicates(subset=["Code", "日付"], keep="last")
             .reset_index(drop=True)
         )
 
         # 指数の前日終値と前日比率の計算 Codeごとにshiftする
-        self.index_df["指数前日終値"] = self.index_df.groupby("Code")["指数終値"].shift(1)
-        self.index_df["指数前日比率"] = (
-            (self.index_df["指数終値"] - self.index_df["指数前日終値"])
-            / self.index_df["指数前日終値"] * 100
+        index_df["指数前日終値"] = index_df.groupby("Code")["指数終値"].shift(1)
+        index_df["指数前日比率"] = (
+            (index_df["指数終値"] - index_df["指数前日終値"])
+            / index_df["指数前日終値"] * 100
         )
 
         # --------------------------------------------------------------------------------
         # ３．指数データのピボット
         # --------------------------------------------------------------------------------
         # index(横軸)に日付、columns（横軸）に「Code」、Valueに「指数前日比率」を指定
-        index_pivot = self.index_df.pivot(
+        index_pivot = index_df.pivot(
             index="日付",
             columns="Code",
             values="指数前日比率"
@@ -291,7 +293,7 @@ class DataPreprocessor:
         # ４．個別株に指数の横結合（マージ）
         # --------------------------------------------------------------------------------
         merged_df = pd.merge(
-            self.stock_df,
+            stock_df,
             index_pivot,
             on="日付",
             how="left"
@@ -441,7 +443,7 @@ class FeatureEngineer:
             (df["終値"] - df["前日終値"]) / df["前日終値"] * 100
         )
 
-        # 前日値幅率
+        # 値幅率
         df["値幅率"] = (
             (df["高値"] - df["安値"]) / df["終値"] * 100
         )
@@ -471,6 +473,12 @@ class FeatureEngineer:
 
         # 出来高急増率
         df["出来高倍率25"] = df["出来高"] / df["出来高MA25"]
+
+        # NaN（業種不明の銘柄や指数など）が含まれる場合は「その他」で埋める
+        df["業種"] = df["業種"].fillna("その他")
+
+        df["業種平均_値幅率"] = df.groupby(["日付", "業種"])["値幅率"].transform("mean")
+        df["業種乖離率"] = df["値幅率"] - df["業種平均_値幅率"]
 
         # 念のため再度日付順に並び替え
         df = df.sort_values(["Code", "日付"]).reset_index(drop=True)
@@ -506,6 +514,8 @@ class FeatureEngineer:
             "上ヒゲ率",
             "下ヒゲ率",
             "出来高倍率25",
+            "業種平均_値幅率",
+            "業種乖離率",
         ]
 
         for col in stock_shift_cols:
@@ -515,7 +525,7 @@ class FeatureEngineer:
         # ==========================
         # 指数：前日情報にずらす
         # ==========================
-        index_cols = index_list.copy()
+        index_cols = self.index_list.copy()
         
         for col in index_cols:
             if col in df.columns:
@@ -547,7 +557,8 @@ class Predictor:
             '予測用_値幅率', '予測用_実体率', '予測用_上ヒゲ率', '予測用_下ヒゲ率',
             '予測用_出来高倍率25', 
             '予測用_^N225', '予測用_NIY=F', '予測用_^NDX', '予測用_^DJI', '予測用_^SPX',
-            '予測用_^SOX', '予測用_USDJPY=X', '予測用_^VIX'
+            '予測用_^SOX', '予測用_USDJPY=X', '予測用_^VIX',
+            "予測用_業種平均_値幅率", "予測用_業種乖離率",
         ]
 
         result_list = []
@@ -713,9 +724,26 @@ class DiscordNotifier:
         df = pred_df.copy()
         df["予測確率"] = (df["予測確率"] * 100).round(1)
 
-        message = "【本日の株価予測ランキング】\n\n"
-        for _, row in df.iterrows():
-            message += f"{row['銘柄名']}：{row['予測確率']}%\n"
+        # 買い候補（トップ10）と空売り候補（ワースト10）を抽出
+        top_10 = df.sort_values(by="予測確率", ascending=False).head(10).copy()
+        bottom_10 = df.sort_values(by="予測確率", ascending=True).head(10).copy()
+
+        # 通知用項目
+        display_cols = ["銘柄名", "予測確率"]
+
+        # メッセージ作成
+
+        message = "** 本日のAI株価予測シグナル（日経225） **\n\n"
+
+        message += " **【買い候補】予測確率トップ10 **\n"
+        message += "'''text\n"
+        message += top_10[display_cols].to_string(index=False)
+        message += "\n'''\n"
+
+        message += " **【空売り候補】予測確率ワースト10 **\n"
+        message += "'''text\n"
+        message += bottom_10[display_cols].to_string(index=False)
+        message += "\n'''\n"
 
         return message
 
@@ -914,19 +942,19 @@ class BackTester:
 if __name__ == "__main__":
 
     # ----- 1.データ取得 --------------------------------------------------------
-    data_acquisition = DataAcquisition(stock_list, index_list)
+    data_acquisition = DataAcquisition(STOCK_CODES, INDEX_CODES)
 
-    # 各メソッドの引数に保存先CSVパスを渡し、取得・更新・結合を自動化
+    # # 各メソッドの引数に保存先CSVパスを渡し、取得・更新・結合を自動化
     stock_df = data_acquisition.fetch_stock_data("stock_data.csv")
     index_df = data_acquisition.fetch_index_data("index_data.csv")
 
     # ----- 2.前処理 --------------------------------------------------------
     # テスト用データ読み込み
-    stock_df = pd.read_csv("stock_data.csv")
-    index_df = pd.read_csv("index_data.csv")
+    stock_df = pd.read_csv("stock_data.csv", dtype={"Code": str, "Date": str})
+    index_df = pd.read_csv("index_data.csv", dtype={"Code": str, "Date": str})
 
-    prprocessor = DataPreprocessor(stock_df, index_df)
-    clean_df = prprocessor.process()
+    prprocessor = DataPreprocessor()
+    clean_df = prprocessor.process(stock_df=stock_df, index_df=index_df)
 
     clean_df.to_pickle("clean_df.pkl")
 
@@ -939,7 +967,7 @@ if __name__ == "__main__":
     pred_df, backtest_pred_df = predictor.prediction_today(feature_df)
 
     print("\n 今日の予測結果↓↓ \n")
-    print(pred_df.head(3))
+    print(pred_df)
 
     pred_df.to_pickle("pred_df.pkl")
     backtest_pred_df.to_pickle("backtest_pred_df.pkl")
@@ -947,8 +975,6 @@ if __name__ == "__main__":
     # ----- 5.通知 ---------------------------------------------------------
     notifier = DiscordNotifier(DISCORD_WEBHOOK_URL)
     notifier.send_discord(pred_df)
-
-    print("\n Discordに通知しました")
 
     # ----- 6.バックテスト ---------------------------------------------------
     clean_df = pd.read_pickle("clean_df.pkl")

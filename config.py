@@ -1,18 +1,24 @@
 import os
+import pandas as pd
 from dotenv import load_dotenv
 
 load_dotenv()
 
+# 日経225採用銘柄をSTOCK_CODESへ
+# CSVデータは日経指数ページより
+NIKKEI_CSV_PATH = "nikkei_225_price_adjustment_factor_jp.csv"
+master_df = pd.read_csv(NIKKEI_CSV_PATH, encoding="cp932", dtype={"コード": str}) # 保存形式がcp932
 
-STOCK_CODES = [
-    "4004", "4062", "5706", "6525", "6857",
-    "6871", "6920", "6976", "6981", "7735",
-    "285A", "9984", "5803", "166A",
-    "5016", "5801", "6954", "6506", "7014",
-    "3436", "6723", "7011", "7012", "7013",
-    "200A", "6613", "6376", "6055", "6227",
-    "7721", "4063", "1969", 
-]
+master_df = master_df.rename(columns={"コード": "Code"}) # Code表記へ変換
+master_df = master_df.dropna(subset=["Code"]) # 欠損値行の削除
+
+# STOCK_CODESへリスト化
+STOCK_CODES = master_df["Code"].astype(str).str.strip().tolist()
+
+# 銘柄名・業種・セクターを辞書
+STOCK_NAMES = master_df.set_index("Code")["銘柄名"].to_dict()
+INDUSTRY_DICT = master_df.set_index("Code")["業種"].to_dict()
+SECTOR_DICT = master_df.set_index("Code")["セクター"].to_dict()
 
 INDEX_CODES = [
     "^N225", # 日経
@@ -25,39 +31,5 @@ INDEX_CODES = [
     "^VIX", #VIX
 ]
 
-STOCK_NAMES = {
-    "4004": "レゾナックHD", 
-    "4062": "イビデン", 
-    "5706": "三井金属", 
-    "6525": "コクサイ", 
-    "6857": "アドバンテスト",
-    "6871": "日本マイクロニクス", 
-    "6920": "レーザーテック", 
-    "6976": "太陽誘電", 
-    "6981": "村田製作所", 
-    "7735": "スクリンHD",
-    "285A": "キオクシアHD", 
-    "9984": "ソフトバンクG", 
-    "5803": "フジクラ", 
-    "166A": "タスキHD",   
-    "5016": "JX金属", 
-    "5801": "古河電気工業", 
-    "6954": "ファナック", 
-    "6506": "安川電機", 
-    "7014": "名村造船所",
-    "3436": "SUMCO", 
-    "6723": "ルネサス", 
-    "7011": "三菱重工業", 
-    "7012": "川崎重工", 
-    "7013": "IHI",
-    "200A": "NF半導体", 
-    "6613": "QDレーザー", 
-    "6376": "日機装", 
-    "6055": "ジャパンマテリアル", 
-    "6227": "AIメカテック",
-    "7721": "東京計器", 
-    "4063": "信越化学工業", 
-    "1969": "高砂熱学工業", 
-}
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
